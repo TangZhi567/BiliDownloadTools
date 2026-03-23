@@ -1,0 +1,25 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build artifacts
+build/
+dist/
+*.spec
+
+# Runtime/download artifacts
+downloads/
+build_resources/
+
+# IDE/OS
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+
