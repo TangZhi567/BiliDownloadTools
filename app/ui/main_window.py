@@ -46,7 +46,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("B站下载工具（PySide6）")
-        self.resize(1180, 860)
+        self.resize(1180, 600)
 
         self._signal_bus = _TaskSignalBus()
         self._signal_bus.task_updated.connect(self._on_task_updated)
@@ -88,7 +88,8 @@ class MainWindow(QMainWindow):
 
         self.link_input = QPlainTextEdit()
         self.link_input.setPlaceholderText("每行一个B站链接，支持批量粘贴")
-        self.link_input.setFixedHeight(95)
+        self.link_input.setMinimumHeight(100)
+        self.link_input.setMaximumHeight(220)
 
         parse_row = QHBoxLayout()
         self.parse_btn = QPushButton("解析链接")
@@ -102,23 +103,13 @@ class MainWindow(QMainWindow):
         input_layout.addWidget(self.link_input)
         input_layout.addLayout(parse_row)
 
-        setting_group = QGroupBox("2) 下载设置")
+        setting_group = QGroupBox("2) 下载参数")
         grid = QGridLayout(setting_group)
 
         self.quality_input = QComboBox()
         self.quality_input.addItems(self.available_qualities)
-        self.save_path_input = QLineEdit(str(Path.cwd() / "downloads"))
-        self.choose_dir_btn = QPushButton("选择目录")
-        self.choose_dir_btn.clicked.connect(self._choose_dir)
-        self.open_dir_btn = QPushButton("打开目录")
-        self.open_dir_btn.clicked.connect(self._open_save_dir)
         self.open_log_btn = QPushButton("打开日志")
         self.open_log_btn.clicked.connect(self._open_log_dir)
-        self.naming_template_input = QLineEdit("({index})- {title}")
-        self.naming_template_reset_btn = QPushButton("重置命名")
-        self.naming_template_reset_btn.clicked.connect(
-            lambda: self.naming_template_input.setText("({index})- {title}")
-        )
         self.concurrent_input = QSpinBox()
         self.concurrent_input.setRange(1, 8)
         self.concurrent_input.setValue(2)
@@ -128,19 +119,43 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.quality_input, 0, 1)
         grid.addWidget(QLabel("并发数"), 0, 2)
         grid.addWidget(self.concurrent_input, 0, 3)
-        grid.addWidget(QLabel("保存目录"), 1, 0)
-        grid.addWidget(self.save_path_input, 1, 1, 1, 2)
-        grid.addWidget(self.choose_dir_btn, 1, 3)
-        grid.addWidget(self.open_dir_btn, 1, 4)
         grid.addWidget(self.open_log_btn, 0, 4)
-        grid.addWidget(QLabel("命名规则"), 2, 0)
-        grid.addWidget(self.naming_template_input, 2, 1, 1, 3)
-        grid.addWidget(self.naming_template_reset_btn, 2, 4)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(2, 0)
+        grid.setColumnStretch(3, 0)
+        grid.setColumnStretch(4, 0)
+
+        path_group = QGroupBox("3) 路径与命名")
+        path_grid = QGridLayout(path_group)
+
+        self.save_path_input = QLineEdit(str(Path.cwd() / "downloads"))
+        self.choose_dir_btn = QPushButton("选择目录")
+        self.choose_dir_btn.clicked.connect(self._choose_dir)
+        self.open_dir_btn = QPushButton("打开目录")
+        self.open_dir_btn.clicked.connect(self._open_save_dir)
+        self.naming_template_input = QLineEdit("({index})- {title}")
+        self.naming_template_reset_btn = QPushButton("重置命名")
+        self.naming_template_reset_btn.clicked.connect(
+            lambda: self.naming_template_input.setText("({index})- {title}")
+        )
+
+        path_grid.addWidget(QLabel("保存目录"), 0, 0)
+        path_grid.addWidget(self.save_path_input, 0, 1, 1, 2)
+        path_grid.addWidget(self.choose_dir_btn, 0, 3)
+        path_grid.addWidget(self.open_dir_btn, 0, 4)
+        path_grid.addWidget(QLabel("命名规则"), 1, 0)
+        path_grid.addWidget(self.naming_template_input, 1, 1, 1, 3)
+        path_grid.addWidget(self.naming_template_reset_btn, 1, 4)
+
+        path_grid.setColumnStretch(1, 1)
+        path_grid.setColumnStretch(2, 0)
+        path_grid.setColumnStretch(3, 0)
+        path_grid.setColumnStretch(4, 0)
 
         self.path_hint = QLabel()
         self.path_hint.setObjectName("PathHint")
         self.path_hint.setText(f"当前下载目录：{Path(self.save_path_input.text()).resolve()}")
-        grid.addWidget(self.path_hint, 3, 0, 1, 5)
+        path_grid.addWidget(self.path_hint, 2, 0, 1, 5)
 
         self.naming_hint = QLabel(
             "可用占位符：\n"
@@ -149,7 +164,7 @@ class MainWindow(QMainWindow):
             "{quality}=清晰度  {bvid}=BV号  {date}=日期(YYYYMMDD)  {time}=时间(HHMMSS)"
         )
         self.naming_hint.setObjectName("PathHint")
-        grid.addWidget(self.naming_hint, 4, 0, 1, 5)
+        path_grid.addWidget(self.naming_hint, 3, 0, 1, 5)
 
         action_row = QHBoxLayout()
         self.select_all_btn = QPushButton("全选")
@@ -163,7 +178,7 @@ class MainWindow(QMainWindow):
         action_row.addWidget(self.start_btn)
         action_row.addStretch(1)
 
-        task_group = QGroupBox("3) 任务列表")
+        task_group = QGroupBox("4) 任务列表")
         task_layout = QVBoxLayout(task_group)
         self.task_table = QTableWidget(0, 9)
         self.task_table.setHorizontalHeaderLabels(["选择", "序号", "标题", "合集", "状态", "进度", "清晰度", "保存目录", "错误信息"])
@@ -188,7 +203,7 @@ class MainWindow(QMainWindow):
         copy_action = self.task_table.addAction("复制选中单元格")
         copy_action.triggered.connect(self._copy_selected_cells)
         copy_action.setShortcut("Ctrl+C")
-        self.task_table.setMinimumHeight(420)
+        self.task_table.setMinimumHeight(360)
         task_layout.addWidget(self.task_table)
 
         self.batch_progress = QProgressBar()
@@ -197,7 +212,11 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(title_bar)
         layout.addWidget(input_group)
-        layout.addWidget(setting_group)
+        config_row = QHBoxLayout()
+        config_row.addWidget(setting_group, 1)
+        config_row.addWidget(path_group, 2)
+
+        layout.addLayout(config_row)
         layout.addLayout(action_row)
         layout.addWidget(task_group)
 

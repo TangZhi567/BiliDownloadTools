@@ -4,3 +4,6 @@
 2026-03-23 17:35:27,915 [INFO] scheduler - 任务开始 id=task_042db47754 title=说点儿实话 《红色沙漠》很好玩，我很喜欢 ！ url=https://www.bilibili.com/video/BV1hQAcz7En9/?spm_id_from=333.1007.tianma.1-2-2.click&vd_source=a02810ee4fb19aeb12742058aef87aa4
 2026-03-23 17:35:28,322 [INFO] scheduler - 下载命令 ytdlp=C:\Users\tangzhi\AppData\Local\Programs\Python\Python310\Scripts\yt-dlp.EXE
 2026-03-23 17:36:05,303 [INFO] scheduler - 任务完成 id=task_042db47754 title=说点儿实话 《红色沙漠》很好玩，我很喜欢 ！
+2026-03-24 09:40:06,736 [INFO] parser - 解析开始 url=https://www.bilibili.com/video/BV1hQAcz7En9/?spm_id_from=333.1007.tianma.1-2-2.click&vd_source=a02810ee4fb19aeb12742058aef87aa4, ytdlp=C:\Users\tangzhi\AppData\Local\Programs\Python\Python310\Scripts\yt-dlp.EXE
+2026-03-24 09:40:08,096 [INFO] parser - 解析命令结束 returncode=0
+2026-03-24 09:40:08,188 [INFO] parser - 解析完成 total=1 valid=1 invalid=0
