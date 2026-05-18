@@ -1,8 +1,6 @@
 import re
 import subprocess
 import os
-import shutil
-import sys
 import time
 import json
 from urllib.parse import quote
@@ -10,6 +8,7 @@ from urllib.request import Request, urlopen
 from typing import Any
 
 from .app_logger import get_logger
+from .ytdlp_utils import build_auth_args, resolve_ytdlp_command
 
 
 logger = get_logger("parser")
@@ -61,25 +60,30 @@ def _extract_qualities(info: dict[str, Any]) -> list[str]:
         note = str(fmt.get("format_note") or "").strip()
         if note:
             labels.add(note)
-            continue
 
         height = fmt.get("height")
         if isinstance(height, int) and height > 0:
             labels.add(f"{height}p")
 
     if not labels:
-        return ["1080p", "720p", "480p"]
+        return ["最佳可用", "2160p", "1080p", "720p", "480p"]
+
+    labels.add("最佳可用")
 
     def _score(label: str) -> int:
-        m = re.search(r"(\d+)p", label)
+        if label == "最佳可用":
+            return 9999
+        m = re.search(r"(\d+)\s*p", label, re.I)
+        if not m:
+            m = re.search(r"(4320|2160|1440|1080|720|480|360)", label)
         return int(m.group(1)) if m else 0
 
     return sorted(labels, key=_score, reverse=True)
 
 
-def _extract_info_with_ytdlp(url: str) -> dict[str, Any] | None:
+def _extract_info_with_ytdlp(url: str, auth_options: dict | None = None) -> dict[str, Any] | None:
     # 调用系统 yt-dlp 命令解析信息（避免 PyInstaller 对 yt_dlp 模块分析异常）
-    ytdlp_cmd = _resolve_ytdlp_command()
+    ytdlp_cmd = resolve_ytdlp_command()
     if not ytdlp_cmd:
         logger.error("未找到 yt-dlp 可执行文件，url=%s", url)
         return None
@@ -92,7 +96,7 @@ def _extract_info_with_ytdlp(url: str) -> dict[str, Any] | None:
             run_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
         proc = subprocess.run(
-            [*ytdlp_cmd, "-J", "--no-warnings", url],
+            [*ytdlp_cmd, "-J", "--no-warnings", *build_auth_args(auth_options), url],
             capture_output=True,
             text=True,
             check=False,
@@ -108,35 +112,6 @@ def _extract_info_with_ytdlp(url: str) -> dict[str, Any] | None:
         logger.warning("解析失败 returncode=%s stderr_tail=%s", proc.returncode, (proc.stderr or "")[-300:])
     except Exception:
         logger.exception("解析异常 url=%s", url)
-
-    return None
-
-
-def _resolve_ytdlp_command() -> list[str] | None:
-    env_path = os.environ.get("BILI_YTDLP_PATH", "").strip()
-    if env_path and os.path.exists(env_path):
-        return [env_path]
-
-    candidates: list[str] = []
-    if getattr(sys, "frozen", False):
-        exe_dir = os.path.dirname(sys.executable)
-        candidates.append(os.path.join(exe_dir, "ytdlp", "yt-dlp.exe"))
-        candidates.append(os.path.join(exe_dir, "_internal", "ytdlp", "yt-dlp.exe"))
-        meipass = getattr(sys, "_MEIPASS", "")
-        if meipass:
-            candidates.append(os.path.join(meipass, "ytdlp", "yt-dlp.exe"))
-            candidates.append(os.path.join(meipass, "_internal", "ytdlp", "yt-dlp.exe"))
-
-    for c in candidates:
-        if os.path.exists(c):
-            return [c]
-
-    which_cmd = shutil.which("yt-dlp")
-    if which_cmd:
-        return [which_cmd]
-
-    if not getattr(sys, "frozen", False):
-        return [sys.executable, "-m", "yt_dlp"]
 
     return None
 
@@ -344,7 +319,7 @@ def _expand_pages_by_id(
         return []
 
 
-def parse_links(raw_text: str) -> dict[str, Any]:
+def parse_links(raw_text: str, auth_options: dict | None = None) -> dict[str, Any]:
     lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
     valid: list[dict[str, Any]] = []
     invalid: list[str] = []
@@ -354,7 +329,7 @@ def parse_links(raw_text: str) -> dict[str, Any]:
     for idx, line in enumerate(lines):
         normalized_url = _normalize_input_to_url(line)
         if _is_bilibili_url(normalized_url):
-            info = _extract_info_with_ytdlp(normalized_url)
+            info = _extract_info_with_ytdlp(normalized_url, auth_options)
 
             # 优先尝试把单P链接扩展为整合集（多P）
             bvid = _extract_bvid(normalized_url, info)

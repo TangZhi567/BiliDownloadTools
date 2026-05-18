@@ -5,13 +5,13 @@ import sys
 import threading
 import time
 import uuid
-import shutil
 from datetime import datetime
 from collections import deque
 from typing import Callable
 
 from ..models.task import DownloadTask
 from .app_logger import get_logger
+from .ytdlp_utils import build_auth_args, resolve_ytdlp_command
 
 
 logger = get_logger("scheduler")
@@ -34,7 +34,14 @@ class DownloadScheduler:
         self._tick()
         return self.max_concurrency
 
-    def start_batch(self, videos: list[dict], save_path: str, quality: str, naming_template: str = "({index})- {title}") -> dict:
+    def start_batch(
+        self,
+        videos: list[dict],
+        save_path: str,
+        quality: str,
+        naming_template: str = "({index})- {title}",
+        auth_options: dict | None = None,
+    ) -> dict:
         with self._lock:
             self._batch_counter += 1
             batch_id = f"batch_{int(time.time() * 1000)}_{self._batch_counter}"
@@ -52,6 +59,7 @@ class DownloadScheduler:
                     save_path=save_path,
                     collection=video.get("collection", ""),
                     naming_template=str(video.get("naming_template") or naming_template),
+                    auth_options=dict(auth_options or {}),
                 )
                 tasks.append(task)
                 self._queue.append(task)
@@ -85,14 +93,16 @@ class DownloadScheduler:
             self.on_task_update(task)
 
             quality_height = self._parse_quality_height(task.quality)
-            if quality_height:
+            if self._is_best_quality(task.quality):
+                fmt = "bestvideo+bestaudio/best"
+            elif quality_height:
                 fmt = f"bestvideo[height<={quality_height}]+bestaudio/best[height<={quality_height}]/best"
             else:
                 fmt = "bestvideo+bestaudio/best"
 
             output_tpl = os.path.join(base_dir, f"{self._build_output_name(task)}.%(ext)s")
 
-            ytdlp_cmd = self._resolve_ytdlp_command()
+            ytdlp_cmd = resolve_ytdlp_command()
             if not ytdlp_cmd:
                 raise RuntimeError("未找到 yt-dlp。请安装依赖或在打包目录提供 ytdlp\\yt-dlp.exe")
 
@@ -127,6 +137,7 @@ class DownloadScheduler:
                 "-o",
                 output_tpl,
             ]
+            cmd.extend(build_auth_args(task.auth_options))
             ffmpeg_location = self._resolve_ffmpeg_location()
             if ffmpeg_location:
                 cmd.extend(["--ffmpeg-location", ffmpeg_location])
@@ -189,7 +200,10 @@ class DownloadScheduler:
 
     @staticmethod
     def _parse_quality_height(quality_text: str) -> int | None:
-        m = re.search(r"(\d+)p", quality_text or "", re.I)
+        text = quality_text or ""
+        m = re.search(r"(\d+)\s*p", text, re.I)
+        if not m:
+            m = re.search(r"(4320|2160|1440|1080|720|480|360)", text)
         if not m:
             return None
         try:
@@ -197,6 +211,11 @@ class DownloadScheduler:
             return h if h > 0 else None
         except ValueError:
             return None
+
+    @staticmethod
+    def _is_best_quality(quality_text: str) -> bool:
+        text = (quality_text or "").strip().lower()
+        return text in {"", "best", "最佳", "最佳可用", "最高", "最高可用"}
 
     @staticmethod
     def _build_output_name(task: DownloadTask) -> str:
@@ -268,35 +287,6 @@ class DownloadScheduler:
             ffprobe_exe = os.path.join(c, "ffprobe.exe")
             if os.path.exists(ffmpeg_exe) and os.path.exists(ffprobe_exe):
                 return c
-
-        return None
-
-    @staticmethod
-    def _resolve_ytdlp_command() -> list[str] | None:
-        env_path = os.environ.get("BILI_YTDLP_PATH", "").strip()
-        if env_path and os.path.exists(env_path):
-            return [env_path]
-
-        candidates: list[str] = []
-        if getattr(sys, "frozen", False):
-            exe_dir = os.path.dirname(sys.executable)
-            candidates.append(os.path.join(exe_dir, "ytdlp", "yt-dlp.exe"))
-            candidates.append(os.path.join(exe_dir, "_internal", "ytdlp", "yt-dlp.exe"))
-            meipass = getattr(sys, "_MEIPASS", "")
-            if meipass:
-                candidates.append(os.path.join(meipass, "ytdlp", "yt-dlp.exe"))
-                candidates.append(os.path.join(meipass, "_internal", "ytdlp", "yt-dlp.exe"))
-
-        for c in candidates:
-            if os.path.exists(c):
-                return [c]
-
-        which_cmd = shutil.which("yt-dlp")
-        if which_cmd:
-            return [which_cmd]
-
-        if not getattr(sys, "frozen", False):
-            return [sys.executable, "-m", "yt_dlp"]
 
         return None
 

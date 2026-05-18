@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import os
+import re
 import threading
 from dataclasses import asdict
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import QObject, Qt, QTimer, Signal
+from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QComboBox,
+    QDialog,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -32,6 +35,12 @@ from PySide6.QtWidgets import (
 
 from ..models.task import DownloadTask
 from ..services.app_logger import get_log_dir, get_log_file
+from ..services.bilibili_login import (
+    BiliQrLoginSession,
+    check_login_status,
+    delete_saved_cookie,
+    get_default_cookie_file,
+)
 from ..services.link_parser import parse_links
 from ..services.scheduler import DownloadScheduler
 
@@ -40,6 +49,159 @@ class _TaskSignalBus(QObject):
     task_updated = Signal(dict)
     parse_finished = Signal(dict)
     parse_failed = Signal(str)
+    login_status_checked = Signal(dict)
+
+
+class QrLoginDialog(QDialog):
+    generated = Signal(str)
+    generation_failed = Signal(str)
+    poll_finished = Signal(dict)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("扫码登录 B站")
+        self.setModal(True)
+        self.resize(360, 430)
+
+        self.session = BiliQrLoginSession()
+        self.cookie_file = ""
+        self.login_url = ""
+        self._polling = False
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        title = QLabel("使用哔哩哔哩 App 扫码登录")
+        title.setObjectName("DialogTitle")
+        title.setAlignment(Qt.AlignCenter)
+
+        self.qr_label = QLabel("正在生成二维码...")
+        self.qr_label.setAlignment(Qt.AlignCenter)
+        self.qr_label.setMinimumSize(360, 360)
+
+        self.status_label = QLabel("请稍候")
+        self.status_label.setObjectName("PathHint")
+        self.status_label.setAlignment(Qt.AlignCenter)
+        self.status_label.setWordWrap(True)
+
+        self.refresh_btn = QPushButton("刷新二维码")
+        self.refresh_btn.clicked.connect(self._start_generate)
+        self.copy_link_btn = QPushButton("复制登录链接")
+        self.copy_link_btn.setEnabled(False)
+        self.copy_link_btn.clicked.connect(self._copy_login_link)
+        self.cancel_btn = QPushButton("取消")
+        self.cancel_btn.clicked.connect(self.reject)
+        btn_row = QHBoxLayout()
+        btn_row.addWidget(self.refresh_btn)
+        btn_row.addWidget(self.copy_link_btn)
+        btn_row.addWidget(self.cancel_btn)
+
+        layout.addWidget(title)
+        layout.addWidget(self.qr_label)
+        layout.addWidget(self.status_label)
+        layout.addLayout(btn_row)
+
+        self.timer = QTimer(self)
+        self.timer.setInterval(2000)
+        self.timer.timeout.connect(self._poll_async)
+        self.generated.connect(self._on_generated)
+        self.generation_failed.connect(self._on_generation_failed)
+        self.poll_finished.connect(self._on_poll_finished)
+
+        QTimer.singleShot(0, self._start_generate)
+
+    def _start_generate(self) -> None:
+        self.timer.stop()
+        self.refresh_btn.setEnabled(False)
+        self.copy_link_btn.setEnabled(False)
+        self.qr_label.setText("正在生成二维码...")
+        self.status_label.setText("请稍候")
+        self.login_url = ""
+        self.session = BiliQrLoginSession()
+
+        def worker() -> None:
+            try:
+                self.generated.emit(self.session.generate())
+            except Exception as ex:
+                self.generation_failed.emit(str(ex))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_generated(self, login_url: str) -> None:
+        self.login_url = login_url
+        self.refresh_btn.setEnabled(True)
+        self.copy_link_btn.setEnabled(True)
+        self.qr_label.setPixmap(self._build_qr_pixmap(login_url))
+        self.status_label.setText("打开哔哩哔哩 App 扫描二维码，然后在手机上确认登录")
+        self.timer.start()
+
+    def _on_generation_failed(self, error_text: str) -> None:
+        self.refresh_btn.setEnabled(True)
+        self.qr_label.setText("二维码生成失败")
+        self.status_label.setText(error_text or "未知错误")
+
+    def _copy_login_link(self) -> None:
+        if self.login_url:
+            QApplication.clipboard().setText(self.login_url)
+            self.status_label.setText("登录链接已复制；仍建议优先使用 B 站 App 扫描二维码")
+
+    def _poll_async(self) -> None:
+        if self._polling:
+            return
+        self._polling = True
+
+        def worker() -> None:
+            try:
+                result = self.session.poll()
+                self.poll_finished.emit(result.__dict__)
+            except Exception as ex:
+                self.poll_finished.emit({"state": "error", "message": str(ex)})
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_poll_finished(self, result: dict) -> None:
+        self._polling = False
+        state = str(result.get("state") or "")
+        message = str(result.get("message") or "")
+        if state == "success":
+            self.timer.stop()
+            self.cookie_file = str(result.get("cookie_file") or "")
+            username = str(result.get("username") or "")
+            self.status_label.setText(f"登录成功：{username}" if username else "登录成功")
+            self.accept()
+            return
+        if state == "expired":
+            self.timer.stop()
+            self.status_label.setText(message or "二维码已过期，请刷新")
+            return
+        self.status_label.setText(message or "等待扫码")
+
+    @staticmethod
+    def _build_qr_pixmap(text: str) -> QPixmap:
+        try:
+            import cv2
+
+            params = cv2.QRCodeEncoder_Params()
+            params.version = 10
+            params.correction_level = cv2.QRCodeEncoder_CORRECT_LEVEL_M
+            params.mode = cv2.QRCodeEncoder_MODE_AUTO
+            encoder = cv2.QRCodeEncoder_create(params)
+            matrix = encoder.encode(text)
+            matrix = cv2.copyMakeBorder(matrix, 4, 4, 4, 4, cv2.BORDER_CONSTANT, value=255)
+            scale = max(1, 360 // matrix.shape[0])
+            matrix = cv2.resize(
+                matrix,
+                (matrix.shape[1] * scale, matrix.shape[0] * scale),
+                interpolation=cv2.INTER_NEAREST,
+            )
+            height, width = matrix.shape
+            image = QImage(matrix.data, width, height, width, QImage.Format_Grayscale8).copy()
+            return QPixmap.fromImage(image)
+        except Exception:
+            pixmap = QPixmap(280, 280)
+            pixmap.fill(Qt.white)
+            return pixmap
 
 
 class MainWindow(QMainWindow):
@@ -52,17 +214,20 @@ class MainWindow(QMainWindow):
         self._signal_bus.task_updated.connect(self._on_task_updated)
         self._signal_bus.parse_finished.connect(self._on_parse_finished)
         self._signal_bus.parse_failed.connect(self._on_parse_failed)
+        self._signal_bus.login_status_checked.connect(self._on_login_status_checked)
         self.scheduler = DownloadScheduler(max_concurrency=2, on_task_update=self._emit_task_update)
 
+        self.saved_cookie_file = str(get_default_cookie_file())
         self.parsed_videos: list[dict] = []
         self.task_rows: dict[str, int] = {}
         self.preview_row_to_video: dict[int, dict] = {}
         self.download_task_rows: dict[int, int] = {}
-        self.available_qualities = ["1080p", "720p", "480p"]
+        self.available_qualities = ["最佳可用", "2160p", "1080p 高码率", "1080p", "720p", "480p"]
         self._is_parsing = False
 
         self._init_ui()
         self._apply_styles()
+        self._refresh_login_status_async()
 
     def _init_ui(self) -> None:
         root = QWidget(self)
@@ -77,7 +242,7 @@ class MainWindow(QMainWindow):
         title_bar_layout.setContentsMargins(0, 0, 0, 0)
         app_title = QLabel("B站视频下载工具")
         app_title.setObjectName("AppTitle")
-        app_tip = QLabel("支持批量链接 · 并发下载 · 实时进度")
+        app_tip = QLabel("支持批量链接 · 登录态高分辨率 · 实时进度")
         app_tip.setObjectName("AppSubTitle")
         title_bar_layout.addWidget(app_title)
         title_bar_layout.addStretch(1)
@@ -114,15 +279,29 @@ class MainWindow(QMainWindow):
         self.concurrent_input.setRange(1, 8)
         self.concurrent_input.setValue(2)
         self.concurrent_input.valueChanged.connect(self._on_concurrency_changed)
+        self.login_status_label = QLabel("登录状态：检查中...")
+        self.login_status_label.setObjectName("ParseResult")
+        self.qr_login_btn = QPushButton("扫码登录")
+        self.qr_login_btn.clicked.connect(self._open_qr_login_dialog)
+        self.logout_btn = QPushButton("退出登录")
+        self.logout_btn.clicked.connect(self._logout_bilibili)
 
         grid.addWidget(QLabel("清晰度"), 0, 0)
         grid.addWidget(self.quality_input, 0, 1)
         grid.addWidget(QLabel("并发数"), 0, 2)
         grid.addWidget(self.concurrent_input, 0, 3)
         grid.addWidget(self.open_log_btn, 0, 4)
+        grid.addWidget(QLabel("B站登录"), 1, 0)
+        grid.addWidget(self.login_status_label, 1, 1)
+        grid.addWidget(self.qr_login_btn, 1, 2)
+        grid.addWidget(self.logout_btn, 1, 3)
+        self.auth_hint = QLabel("高分辨率/高码率通常需要登录账号；登录态只保存在本机并用于解析和下载。")
+        self.auth_hint.setObjectName("PathHint")
+
+        grid.addWidget(self.auth_hint, 2, 0, 1, 5)
         grid.setColumnStretch(1, 1)
         grid.setColumnStretch(2, 0)
-        grid.setColumnStretch(3, 0)
+        grid.setColumnStretch(3, 1)
         grid.setColumnStretch(4, 0)
 
         path_group = QGroupBox("3) 路径与命名")
@@ -322,15 +501,28 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "提示", "请先输入链接再解析")
             return
 
+        if not self._has_effective_auth_options():
+            answer = QMessageBox.question(
+                self,
+                "未检测到登录态",
+                "未登录时通常只能解析到较低清晰度。是否现在扫码登录 B 站？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if answer == QMessageBox.Yes:
+                if not self._open_qr_login_dialog():
+                    return
+
         self._is_parsing = True
         self.parse_btn.setEnabled(False)
         self.parse_result.setText("解析中，请稍候...")
 
-        threading.Thread(target=self._parse_worker, args=(raw_text,), daemon=True).start()
+        auth_options = self._collect_auth_options()
+        threading.Thread(target=self._parse_worker, args=(raw_text, auth_options), daemon=True).start()
 
-    def _parse_worker(self, raw_text: str) -> None:
+    def _parse_worker(self, raw_text: str, auth_options: dict) -> None:
         try:
-            result = parse_links(raw_text)
+            result = parse_links(raw_text, auth_options=auth_options)
             self._signal_bus.parse_finished.emit(result)
         except Exception as ex:
             self._signal_bus.parse_failed.emit(str(ex))
@@ -347,7 +539,7 @@ class MainWindow(QMainWindow):
             for q in video.get("qualities", []):
                 quality_set.add(q)
         if quality_set:
-            self.available_qualities = sorted(quality_set, reverse=True)
+            self.available_qualities = self._sort_quality_labels(quality_set)
             current = self.quality_input.currentText()
             self.quality_input.blockSignals(True)
             self.quality_input.clear()
@@ -448,6 +640,32 @@ class MainWindow(QMainWindow):
         os.startfile(str(log_dir))
         self.parse_result.setText(f"日志文件：{get_log_file()}")
 
+    def _open_qr_login_dialog(self) -> bool:
+        dialog = QrLoginDialog(self)
+        ok = dialog.exec() == QDialog.Accepted
+        if ok and dialog.cookie_file:
+            self.saved_cookie_file = dialog.cookie_file
+            self.login_status_label.setText("登录状态：已登录")
+            self._refresh_login_status_async()
+            return True
+        return False
+
+    def _logout_bilibili(self) -> None:
+        delete_saved_cookie(self.saved_cookie_file)
+        self.login_status_label.setText("登录状态：未登录")
+
+    def _refresh_login_status_async(self) -> None:
+        def worker() -> None:
+            status = check_login_status(self.saved_cookie_file)
+            self._signal_bus.login_status_checked.emit(status.__dict__)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_login_status_checked(self, status: dict) -> None:
+        logged_in = bool(status.get("logged_in"))
+        message = str(status.get("message") or ("已登录" if logged_in else "未登录"))
+        self.login_status_label.setText(f"登录状态：{message}")
+
     def _on_concurrency_changed(self, value: int) -> None:
         self.scheduler.set_concurrency(value)
 
@@ -498,10 +716,13 @@ class MainWindow(QMainWindow):
             save_path=save_path,
             quality=quality,
             naming_template=naming_template,
+            auth_options=self._collect_auth_options(),
         )
 
     def _emit_task_update(self, task: DownloadTask) -> None:
-        self._signal_bus.task_updated.emit(asdict(task))
+        payload = asdict(task)
+        payload.pop("auth_options", None)
+        self._signal_bus.task_updated.emit(payload)
 
     def _on_task_updated(self, task: dict) -> None:
         task_id = task["id"]
@@ -588,4 +809,33 @@ class MainWindow(QMainWindow):
         if not path_text:
             path_text = str(Path.cwd() / "downloads")
         return str(Path(path_text).resolve())
+
+    def _collect_auth_options(self) -> dict:
+        cookie_file = self.saved_cookie_file if Path(self.saved_cookie_file).exists() else ""
+        return {
+            "browser": "",
+            "cookie_file": cookie_file,
+            "cookie_header": "",
+        }
+
+    def _has_effective_auth_options(self) -> bool:
+        auth_options = self._collect_auth_options()
+        cookie_file = str(auth_options.get("cookie_file") or "").strip()
+        return bool(cookie_file and Path(cookie_file).exists())
+
+    @staticmethod
+    def _sort_quality_labels(labels: set[str]) -> list[str]:
+        def score(label: str) -> tuple[int, str]:
+            text = label.strip()
+            if text == "最佳可用":
+                return (9999, text)
+
+            m = re.search(r"(\d+)\s*p", text, re.I)
+            if not m:
+                m = re.search(r"(4320|2160|1440|1080|720|480|360)", text)
+            height = int(m.group(1)) if m else 0
+            boost = 10 if any(word in text for word in ("高码率", "60", "HDR", "杜比", "Dolby")) else 0
+            return (height + boost, text)
+
+        return sorted(labels, key=score, reverse=True)
 
